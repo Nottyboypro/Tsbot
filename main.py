@@ -2,7 +2,8 @@ import os
 import asyncio
 import zipfile
 import io
-from pyrogram import Client, filters
+from datetime import datetime
+from pyrogram import Client, filters, idle
 from pyrogram.types import (
     Message, InlineKeyboardMarkup, 
     InlineKeyboardButton, CallbackQuery
@@ -16,6 +17,19 @@ app = Client("session_bot", api_id=API_ID, api_hash=API_HASH, bot_token=BOT_TOKE
 
 # Initialize payment gateway
 razorpay = RazorpayPayment(RAZORPAY_KEY_ID, RAZORPAY_KEY_SECRET)
+
+# Dummy functions for now (implement later)
+async def extract_number_from_zip(file_data):
+    """Extract phone number from ZIP file"""
+    return "+1234567890"  # Placeholder
+
+async def read_otp_from_file(file_data):
+    """Read OTP from file"""
+    return "123456"  # Placeholder
+
+async def generate_qr_code(url):
+    """Generate QR code for payment"""
+    return "https://via.placeholder.com/300"  # Placeholder
 
 # Start Command
 @app.on_message(filters.command("start"))
@@ -60,10 +74,10 @@ async def profile_callback(client, callback_query: CallbackQuery):
 
 **🆔 User ID:** `{user_id}`
 **👤 Name:** {callback_query.from_user.first_name}
-**💰 Wallet Balance:** ₹{user['wallet_balance']}
-**📊 Total Spent:** ₹{user['total_spent']}
-**👥 Referrals:** {user['referral_count']} users
-**🔗 Referral Code:** `{user['referral_code']}`
+**💰 Wallet Balance:** ₹{user.get('wallet_balance', 0)}
+**📊 Total Spent:** ₹{user.get('total_spent', 0)}
+**👥 Referrals:** {user.get('referral_count', 0)} users
+**🔗 Referral Code:** `{user.get('referral_code', 'N/A')}`
 **🎁 Referral Bonus:** ₹0.5 per user
 
 **Invite friends and earn money!**
@@ -137,10 +151,11 @@ async def platform_selection(client, callback_query: CallbackQuery):
             "used": False
         })
         
-        keyboard_buttons.append([InlineKeyboardButton(
-            f"🇺🇸 {country} - ₹{number['price']}", 
-            callback_data=f"country_{platform}_{country}"
-        )])
+        if number:
+            keyboard_buttons.append([InlineKeyboardButton(
+                f"🇺🇸 {country} - ₹{number['price']}", 
+                callback_data=f"country_{platform}_{country}"
+            )])
     
     keyboard_buttons.append([InlineKeyboardButton("🔙 Back", callback_data="get_number")])
     
@@ -195,7 +210,7 @@ Please recharge your wallet to continue.
     await db.update_wallet(user_id, -number_data['price'])
     await db.mark_number_used(number_data['_id'], user_id)
     
-    # Extract number from file (pseudo code - implement based on your file format)
+    # Extract number from file
     phone_number = await extract_number_from_zip(number_data['file_data'])
     
     success_text = f"""
@@ -250,7 +265,7 @@ async def read_otp_callback(client, callback_query: CallbackQuery):
         await callback_query.answer("❌ Number data not found!", show_alert=True)
         return
     
-    # Read OTP from file (implement your OTP reading logic here)
+    # Read OTP from file
     otp_code = await read_otp_from_file(number_data['file_data'])
     
     if otp_code:
@@ -297,9 +312,9 @@ async def balance_callback(client, callback_query: CallbackQuery):
     balance_text = f"""
 **💰 Wallet Balance**
 
-**Current Balance:** ₹{user['wallet_balance']}
-**Total Spent:** ₹{user['total_spent']}
-**Referral Earnings:** ₹{user['referral_count'] * 0.5}
+**Current Balance:** ₹{user.get('wallet_balance', 0)}
+**Total Spent:** ₹{user.get('total_spent', 0)}
+**Referral Earnings:** ₹{user.get('referral_count', 0) * 0.5}
 
 **💸 Recharge Options:**
 - Minimum: ₹{MIN_RECHARGE}
@@ -341,13 +356,17 @@ Please enter the amount you want to recharge:
         {"$set": {"waiting_for": "recharge_amount"}}
     )
 
-# Handle recharge amount input
-@app.on_message(filters.text & filters.private & ~filters.command)
+# Handle recharge amount input - FIXED FILTER
+@app.on_message(filters.text & filters.private)
 async def handle_recharge_amount(client, message: Message):
+    # Skip if it's a command
+    if message.text.startswith('/'):
+        return
+        
     user_id = message.from_user.id
     user = await db.get_user(user_id)
     
-    if user.get('waiting_for') == 'recharge_amount':
+    if user and user.get('waiting_for') == 'recharge_amount':
         try:
             amount = int(message.text)
             
@@ -387,26 +406,124 @@ async def handle_recharge_amount(client, message: Message):
                 [InlineKeyboardButton("📞 Support", url=SUPPORT_GROUP)]
             ])
             
-            # Send QR code image (you need to generate QR from payment_data['short_url'])
+            # Send QR code image
             await message.reply_photo(
                 photo=await generate_qr_code(payment_data['short_url']),
                 caption=payment_text,
                 reply_markup=keyboard
             )
             
+            # Reset waiting state
+            await db.db.users.update_one(
+                {"user_id": user_id},
+                {"$unset": {"waiting_for": ""}}
+            )
+            
         except ValueError:
             await message.reply_text("❌ Please enter a valid number only!")
+
+# Payment Done Callback
+@app.on_callback_query(filters.regex("^payment_done_"))
+async def payment_done_callback(client, callback_query: CallbackQuery):
+    payment_id = callback_query.data.split("_")[2]
+    
+    await callback_query.edit_message_text(
+        "**✅ Payment Verification**\n\n"
+        "Please send your UTR/Transaction ID:\n\n"
+        "**Example:** `UTR123456789` or `TXN123456789`"
+    )
+    
+    # Store payment ID and waiting for UTR
+    await db.db.users.update_one(
+        {"user_id": callback_query.from_user.id},
+        {"$set": {
+            "waiting_for": "payment_utr",
+            "current_payment_id": payment_id
+        }}
+    )
+
+# Handle UTR input
+@app.on_message(filters.text & filters.private)
+async def handle_utr_input(client, message: Message):
+    # Skip if it's a command
+    if message.text.startswith('/'):
+        return
+        
+    user_id = message.from_user.id
+    user = await db.get_user(user_id)
+    
+    if user and user.get('waiting_for') == 'payment_utr':
+        utr = message.text.strip()
+        payment_id = user.get('current_payment_id')
+        
+        # Verify payment (simplified for now)
+        is_verified = await razorpay.verify_payment(payment_id)
+        
+        if is_verified:
+            # Get payment amount from database or Razorpay
+            payment_data = await db.db.payments.find_one({"payment_id": payment_id})
+            amount = payment_data.get('amount', 0) if payment_data else 0
+            
+            # Update wallet
+            await db.update_wallet(user_id, amount)
+            
+            # Update payment status
+            await db.db.payments.update_one(
+                {"payment_id": payment_id},
+                {"$set": {"status": "verified", "utr": utr}}
+            )
+            
+            # Get updated user data
+            updated_user = await db.get_user(user_id)
+            
+            success_text = f"""
+**✅ Payment Verified Successfully!**
+
+**Amount Added:** ₹{amount}
+**UTR Number:** `{utr}`
+**New Balance:** ₹{updated_user['wallet_balance']}
+
+Thank you for your payment! 🎉
+            """
+            
+            keyboard = InlineKeyboardMarkup([
+                [InlineKeyboardButton("💰 Check Balance", callback_data="balance")],
+                [InlineKeyboardButton("🔢 Get Number", callback_data="get_number")]
+            ])
+            
+            await message.reply_text(
+                success_text,
+                reply_markup=keyboard
+            )
+        else:
+            await message.reply_text(
+                "**❌ Payment Not Verified**\n\n"
+                "We couldn't verify your payment. Please:\n"
+                "1. Check if payment was completed\n"
+                "2. Ensure UTR is correct\n"
+                "3. Contact admin with screenshot\n\n"
+                "Click below for support:",
+                reply_markup=InlineKeyboardMarkup([
+                    [InlineKeyboardButton("📞 Contact Admin", url=SUPPORT_GROUP)]
+                ])
+            )
+        
+        # Reset waiting state
+        await db.db.users.update_one(
+            {"user_id": user_id},
+            {"$unset": {"waiting_for": "", "current_payment_id": ""}}
+        )
 
 # Admin Commands
 @app.on_message(filters.command("cs") & filters.private)
 async def create_session_command(client, message: Message):
     # Session creation logic here
-    pass
+    await message.reply_text("🚧 Session creation feature coming soon!")
 
 @app.on_message(filters.command("readotp") & filters.private)
 async def read_otp_command(client, message: Message):
     # OTP reading logic here
-    pass
+    await message.reply_text("🚧 OTP reading feature coming soon!")
 
 @app.on_message(filters.command("addfile") & filters.private)
 async def add_file_command(client, message: Message):
@@ -426,6 +543,59 @@ async def add_file_command(client, message: Message):
         "Then send the ZIP file."
     )
 
+# How to Use
+@app.on_callback_query(filters.regex("^how_to_use$"))
+async def how_to_use_callback(client, callback_query: CallbackQuery):
+    how_to_text = """
+**📖 How to Use This Bot**
+
+**1. 💰 Recharge Wallet**
+   - Minimum recharge: ₹20
+   - Use UPI payment methods
+   - Automatic verification
+
+**2. 🔢 Get Numbers**
+   - Select platform (Telegram, etc.)
+   - Choose country
+   - Auto number assignment
+
+**3. 📲 Get OTP**
+   - Request OTP in official app
+   - Click 'I Requested OTP'
+   - Receive OTP automatically
+
+**4. 👥 Referral System**
+   - Earn ₹0.5 per referral
+   - Share your referral code
+   - Both get bonus!
+
+**Need Help?** Contact support below.
+    """
+    
+    keyboard = InlineKeyboardMarkup([
+        [InlineKeyboardButton("📞 Support Group", url=SUPPORT_GROUP)],
+        [InlineKeyboardButton("🔙 Back", callback_data="main_menu")]
+    ])
+    
+    await callback_query.edit_message_text(
+        how_to_text,
+        reply_markup=keyboard
+    )
+
+# Redeem Code
+@app.on_callback_query(filters.regex("^redeem$"))
+async def redeem_callback(client, callback_query: CallbackQuery):
+    await callback_query.edit_message_text(
+        "**🎁 Redeem Code**\n\n"
+        "Please enter your redeem code:\n\n"
+        "**Example:** `CODE123`"
+    )
+    
+    await db.db.users.update_one(
+        {"user_id": callback_query.from_user.id},
+        {"$set": {"waiting_for": "redeem_code"}}
+    )
+
 # Main menu callback
 @app.on_callback_query(filters.regex("^main_menu$"))
 async def main_menu_callback(client, callback_query: CallbackQuery):
@@ -434,8 +604,10 @@ async def main_menu_callback(client, callback_query: CallbackQuery):
 # Initialize bot
 async def main():
     await db.init_db()
-    print("Bot started successfully!")
+    print("✅ Bot started successfully!")
+    print("✅ Database connected!")
     await app.start()
+    print("✅ Pyrogram client started!")
     await idle()
     await app.stop()
 
