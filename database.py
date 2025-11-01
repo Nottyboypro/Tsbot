@@ -1,8 +1,9 @@
 from motor.motor_asyncio import AsyncIOMotorClient
-from config import MONGO_DB_URI
-from logging import Logger
+from datetime import datetime
+import logging
+from config import MONGO_DB_URI, ADMIN_IDS
 
-logger = Logger(__name__)
+logger = logging.getLogger(__name__)
 
 class MongoDB:
     def __init__(self):
@@ -13,10 +14,11 @@ class MongoDB:
         try:
             self.client = AsyncIOMotorClient(MONGO_DB_URI)
             self.db = self.client.SessionBot
-            logger.info("Connected to MongoDB successfully!")
+            logger.info("✅ Connected to MongoDB successfully!")
+            return True
         except Exception as e:
-            logger.error(f"Failed to connect to MongoDB: {e}")
-            exit()
+            logger.error(f"❌ Failed to connect to MongoDB: {e}")
+            return False
 
     # User Management
     async def add_user(self, user_id, username, first_name):
